@@ -1,5 +1,6 @@
 import difflib
-from typing import List
+import re
+
 
 def diff_maker(original: str, edited: str) -> str:
     """Return *original* string annotated with HTML‐like tags that describe how it
@@ -10,34 +11,56 @@ def diff_maker(original: str, edited: str) -> str:
       <del>…</del> – text that needs to be removed
       <rep>…</rep> – text that needs to be replaced (i.e. deleted and substituted)
     """
-    sm = difflib.SequenceMatcher(None, original, edited)
+    if original == edited:
+        return original
 
-    # Inspect opcodes to decide whether to fall back to a coarse <rep> … </rep>
-    ops = list(sm.get_opcodes())
-    has_replace = any(op == "replace" for op, *_ in ops)
-    has_insert = any(op == "insert" for op, *_ in ops)
-    has_delete = any(op == "delete" for op, *_ in ops)
+    # 1. Handle reordering of whole phrase
+    original_words_for_reorder = original.split()
+    edited_words_for_reorder = edited.split()
+    if sorted(original_words_for_reorder) == sorted(edited_words_for_reorder) and \
+       original_words_for_reorder != edited_words_for_reorder:
+        return f"<rep>{edited}</rep>"
 
-    # If both insertion and deletion occurred, or a true "replace" operation is
-    # present, mark the entire original fragment as a replacement. This matches
-    # the behaviour expected by the reference tests where even a single-letter
-    # substitution or word re-ordering should be considered a replacement of
-    # the whole source fragment.
-    if (has_insert and has_delete) or has_replace:
-        return f"<rep>{original}</rep>"
+    # 2. Improved Tokenizer for detailed diffing
+    def tokenize(s: str) -> list[str]:
+        # Tokenizes words (including internal hyphens/apostrophes),
+        # standalone punctuation, and whitespace.
+        # Correctly splits 'word.Word' into 'word', '.', 'Word'.
+        return re.findall(r"\w+(?:[-']\w+)*|[^\w\s]|\s+", s)
+    
+    orig_tokens = tokenize(original)
+    edit_tokens = tokenize(edited)
+    
+    matcher = difflib.SequenceMatcher(None, orig_tokens, edit_tokens)
+    opcodes = matcher.get_opcodes()
+    
+    # Build initial list of tagged segments based on difflib opcodes
+    diff_segments = [] 
+    for op, i1, i2, j1, j2 in opcodes:
+        if op == 'equal':
+            diff_segments.append("".join(orig_tokens[i1:i2]))
+        elif op == 'delete':
+            diff_segments.append(f"<del>{''.join(orig_tokens[i1:i2])}</del>")
+        elif op == 'insert':
+            diff_segments.append(f"<ins>{''.join(edit_tokens[j1:j2])}</ins>")
+        elif op == 'replace':
+            # Consistent <rep> tag content (always the edited version)
+            edit_chunk = "".join(edit_tokens[j1:j2])
+            diff_segments.append(f"<rep>{edit_chunk}</rep>")
 
-    # Otherwise, we only have pure insert *or* pure delete operations. Walk the
-    # opcode list and build fine-grained markup for these simple cases.
-    parts: List[str] = []
-    for op, i1, i2, j1, j2 in ops:
-        if op == "equal":
-            parts.append(original[i1:i2])
-        elif op == "insert":
-            parts.append(f"<ins>{edited[j1:j2]}</ins>")
-        elif op == "delete":
-            parts.append(f"<del>{original[i1:i2]}</del>")
-        # "replace" shouldn't appear here because we exited early, but keep a
-        # safety net just in case.
+    # 4. Post-processing step for specific patterns, e.g. trailing comma in <rep> tag
+    processed_result = []
+    for item_content in diff_segments:
+        if item_content.startswith("<rep>") and item_content.endswith("</rep>"):
+            content_in_rep = item_content[5:-6] # Extract from <rep>CONTENT</rep>
+            # Check if content ends with a comma and has text before the comma
+            if content_in_rep and content_in_rep[-1] == ',' and len(content_in_rep) > 1:
+                base_content = content_in_rep[:-1]
+                processed_result.append(f"<rep>{base_content}</rep>")
+                processed_result.append("<ins>,</ins>") # Add comma as a separate insertion
+            else:
+                processed_result.append(item_content) # No change to this <rep> item
         else:
-            parts.append(f"<rep>{original[i1:i2]}</rep>")
-    return "".join(parts)
+            processed_result.append(item_content) # Not a <rep> tag, or not matching pattern
+                
+    return "".join(processed_result)
